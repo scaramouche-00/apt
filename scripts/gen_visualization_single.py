@@ -17,12 +17,13 @@ from matplotlib import cm
 
 from src.data.transforms import transforms_imagenet_train, transforms_imagenet_eval, ImageFolderWithEntropy
 from src.models.entropy_utils import (
-    compute_patch_entropy_vectorized, 
-    compute_patch_laplacian_vectorized,
-    compute_patch_mse_batched,
-    select_patches_by_threshold, 
-    visualize_selected_patches_cv2_non_overlapping
+    get_importance_method,
+    IMPORTANCE_METHOD_REGISTRY,
+    select_patches_by_threshold,
+    visualize_selected_patches_cv2_non_overlapping,
 )
+
+AVAILABLE_METHODS = sorted(IMPORTANCE_METHOD_REGISTRY.keys())
 
 # Default parameters
 IMAGE_SIZE = 336
@@ -39,10 +40,10 @@ def parse_args():
     parser.add_argument('--input', type=str, required=True, help='Input image path')
     parser.add_argument('--vis_type', type=str, default='grid', choices=['entropy', 'grid', 'none'], 
                         help='Visualization type: entropy-based, standard grid, or no lines')
-    parser.add_argument('--method', type=str, default='entropy', choices=['entropy', 'laplacian', 'upsample_mse'],
-                        help='Method for computing importance maps: entropy, laplacian, or upsample_mse')
+    parser.add_argument('--method', type=str, default='entropy', choices=AVAILABLE_METHODS,
+                        help='Method for computing importance maps.')
     parser.add_argument('--aggregate', type=str, default='mean', choices=['mean', 'max', 'std'],
-                        help='Aggregation method for laplacian and upsample_mse (default: mean)')
+                        help='Aggregation method for laplacian, mean_density, and upsample_mse methods (default: mean)')
     parser.add_argument('--image_size', type=int, default=IMAGE_SIZE, help='Target image size for the shorter side')
     parser.add_argument('--patch_size', type=int, default=BASE_PATCH_SIZE, help='Base patch size')
     parser.add_argument('--num_scales', type=int, default=NUM_SCALES, help='Number of scales for entropy calculation')
@@ -150,21 +151,33 @@ def process_image(image_path, vis_type, method, aggregate, image_size, patch_siz
         img_int_tensor = img_tensor.to(torch.uint8)
         
         # Compute importance maps based on selected method
-        if method == 'entropy':
-            importance_maps = compute_patch_entropy_vectorized(img_tensor, patch_size, num_scales)
-            map_name = 'entropy'
-        elif method == 'laplacian':
-            importance_maps = compute_patch_laplacian_vectorized(img_tensor, patch_size, num_scales, aggregate=aggregate)
-            map_name = f'laplacian_{aggregate}'
-        elif method == 'upsample_mse':
-            # upsample_mse only has batched version, so add batch dimension
-            img_batched = img_tensor.unsqueeze(0)  # Add batch dimension
-            importance_maps_batched = compute_patch_mse_batched(img_batched, patch_size, num_scales, aggregate=aggregate)
-            # Remove batch dimension from results
-            importance_maps = {k: v.squeeze(0) for k, v in importance_maps_batched.items()}
-            map_name = f'upsample_mse_{aggregate}'
+        importance_method = get_importance_method(method)
+        if aggregate != 'mean' and not importance_method.supports_aggregate:
+            raise ValueError(
+                f"Aggregation '{aggregate}' is not supported for method '{method}'."
+            )
+
+        method_kwargs = importance_method.resolve_kwargs(
+            aggregate=aggregate if importance_method.supports_aggregate else None,
+        )
+
+        if importance_method.single is not None:
+            importance_maps = importance_method.single(
+                img_tensor,
+                patch_size=patch_size,
+                num_scales=num_scales,
+                **method_kwargs,
+            )
         else:
-            raise ValueError(f"Unknown method: {method}")
+            batched_maps = importance_method.batched(
+                img_tensor.unsqueeze(0),
+                patch_size=patch_size,
+                num_scales=num_scales,
+                **method_kwargs,
+            )
+            importance_maps = {k: v.squeeze(0) for k, v in batched_maps.items()}
+
+        map_name = method if aggregate == 'mean' else f'{method}_{aggregate}'
         
         # Ensure output directory exists
         os.makedirs(OUTPUT_DIR, exist_ok=True)
