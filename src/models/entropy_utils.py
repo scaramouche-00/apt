@@ -18,14 +18,90 @@ information content (entropy).
 import numpy as np
 import torch
 import torch.nn.functional as F
-from typing import List, Tuple, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Tuple, Optional, Union
 from torchvision.transforms import functional as TF
 import math
 import cv2
 from PIL import Image
 import ipdb
 
-def compute_patch_entropy_vectorized(image, patch_size=16, num_scales=2, bins=512, pad_value=1e6):
+
+@dataclass
+class ImportanceMethod:
+    """Container describing how to compute importance maps for a method."""
+
+    batched: Callable[..., Dict[int, torch.Tensor]]
+    single: Optional[Callable[..., Dict[int, torch.Tensor]]] = None
+    supports_aggregate: bool = False
+    default_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    def resolve_kwargs(
+        self,
+        *,
+        aggregate: Optional[str] = None,
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build keyword arguments for the method call with sensible defaults."""
+
+        resolved: Dict[str, Any] = dict(self.default_kwargs)
+        if overrides:
+            resolved.update(overrides)
+
+        if aggregate is not None and self.supports_aggregate:
+            resolved.setdefault("aggregate", aggregate)
+
+        return resolved
+
+
+IMPORTANCE_METHOD_REGISTRY: Dict[str, ImportanceMethod] = {}
+
+
+def register_importance_method(
+    name: str,
+    *,
+    batched: Callable[..., Dict[int, torch.Tensor]],
+    single: Optional[Callable[..., Dict[int, torch.Tensor]]] = None,
+    supports_aggregate: bool = False,
+    default_kwargs: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Register a new importance map computation method.
+
+    Args:
+        name: Human readable name for the method.
+        batched: Callable that accepts a batch of images and returns a dictionary
+            of importance maps keyed by patch size.
+        single: Optional callable for single-image computation. If omitted,
+            the batched callable will be used with an added batch dimension.
+    """
+
+    IMPORTANCE_METHOD_REGISTRY[name] = ImportanceMethod(
+        batched=batched,
+        single=single,
+        supports_aggregate=supports_aggregate,
+        default_kwargs=dict(default_kwargs or {}),
+    )
+
+
+def get_importance_method(name: str) -> ImportanceMethod:
+    """Retrieve a registered importance map method by name."""
+
+    try:
+        return IMPORTANCE_METHOD_REGISTRY[name]
+    except KeyError as exc:
+        available_methods = ", ".join(sorted(IMPORTANCE_METHOD_REGISTRY.keys())) or "<none>"
+        raise ValueError(
+            f"Unknown importance method '{name}'. Available methods: {available_methods}"
+        ) from exc
+
+def compute_patch_entropy_vectorized(
+    image,
+    patch_size=16,
+    num_scales=2,
+    bins=512,
+    pad_value=1e6,
+    **kwargs,
+):
     """
     Compute entropy maps for multiple patch sizes in the input image using vectorized operations.
     
@@ -87,7 +163,14 @@ def compute_patch_entropy_vectorized(image, patch_size=16, num_scales=2, bins=51
 
     return entropy_maps
 
-def compute_patch_entropy_batched(images, patch_size=16, num_scales=2, bins=512, pad_value=1e6):
+def compute_patch_entropy_batched(
+    images,
+    patch_size=16,
+    num_scales=2,
+    bins=512,
+    pad_value=1e6,
+    **kwargs,
+):
     """
     Compute entropy maps for multiple patch sizes in a batch of images using fully vectorized operations.
     
@@ -296,7 +379,14 @@ def visualize_selected_patches_cv2(
 
     return annotated_image_pil
 
-def compute_patch_laplacian_vectorized(image, patch_size=16, num_scales=2, aggregate='mean', pad_mode='reflect'):
+def compute_patch_laplacian_vectorized(
+    image,
+    patch_size=16,
+    num_scales=2,
+    aggregate='mean',
+    pad_mode='reflect',
+    **kwargs,
+):
     """
     Compute Laplacian response maps for multiple patch sizes in the input image using vectorized operations.
     
@@ -366,7 +456,14 @@ def compute_patch_laplacian_vectorized(image, patch_size=16, num_scales=2, aggre
     
     return laplacian_maps
 
-def compute_patch_laplacian_batched(images, patch_size=16, num_scales=2, aggregate='mean', pad_mode='reflect'):
+def compute_patch_laplacian_batched(
+    images,
+    patch_size=16,
+    num_scales=2,
+    aggregate='mean',
+    pad_mode='reflect',
+    **kwargs,
+):
     """
     Compute Laplacian response maps for multiple patch sizes in a batch of images using fully vectorized operations.
     
@@ -450,7 +547,95 @@ def compute_patch_laplacian_batched(images, patch_size=16, num_scales=2, aggrega
     
     return batch_laplacian_maps
 
-def compute_patch_mse_batched(images, patch_size=16, num_scales=3, scale_factors=None, aggregate='mean'):
+
+def compute_patch_mean_density_batched(
+    images,
+    patch_size=16,
+    num_scales=2,
+    aggregate='mean',
+    **kwargs,
+):
+    """Compute per-patch mean density values for a batch of images."""
+
+    if images.dim() != 4:
+        raise ValueError(
+            f"Expected images with shape (B, C, H, W), but received shape {tuple(images.shape)}"
+        )
+
+    images = images.float()
+    batch_size, channels, H, W = images.shape
+
+    if channels > 1:
+        intensity = images.mean(dim=1, keepdim=True)
+    else:
+        intensity = images[:, :1]
+
+    patch_sizes = [patch_size * (2**i) for i in range(num_scales)]
+    batch_density_maps: Dict[int, torch.Tensor] = {}
+
+    for ps in patch_sizes:
+        pad_h = (ps - H % ps) % ps
+        pad_w = (ps - W % ps) % ps
+
+        padded = F.pad(intensity, (0, pad_w, 0, pad_h), mode='replicate')
+        unfolded = F.unfold(padded, kernel_size=ps, stride=ps)
+        unfolded = unfolded.view(batch_size, 1, ps * ps, -1)
+
+        if aggregate == 'mean':
+            patch_density = unfolded.mean(dim=2)
+        elif aggregate == 'max':
+            patch_density = unfolded.amax(dim=2)
+        elif aggregate == 'std':
+            patch_density = unfolded.std(dim=2)
+        else:
+            raise ValueError(
+                f"Unknown aggregation method '{aggregate}'. Choose from 'mean', 'max', or 'std'."
+            )
+
+        num_patches_h = (H + pad_h) // ps
+        num_patches_w = (W + pad_w) // ps
+        patch_density = patch_density.view(batch_size, 1, num_patches_h, num_patches_w)
+        batch_density_maps[ps] = patch_density.squeeze(1)
+
+    return batch_density_maps
+
+
+def compute_patch_mean_density_vectorized(
+    image,
+    patch_size=16,
+    num_scales=2,
+    aggregate='mean',
+    **kwargs,
+):
+    """Compute per-patch mean density values for a single image."""
+
+    if image.dim() == 2:
+        image = image.unsqueeze(0).unsqueeze(0)
+    elif image.dim() == 3:
+        image = image.unsqueeze(0)
+    else:
+        raise ValueError(
+            f"Expected image tensor with 2 or 3 dimensions, but received shape {tuple(image.shape)}"
+        )
+
+    batch_maps = compute_patch_mean_density_batched(
+        image,
+        patch_size=patch_size,
+        num_scales=num_scales,
+        aggregate=aggregate,
+    )
+
+    return {k: v.squeeze(0) for k, v in batch_maps.items()}
+
+
+def compute_patch_mse_batched(
+    images,
+    patch_size=16,
+    num_scales=3,
+    scale_factors=None,
+    aggregate='mean',
+    **kwargs,
+):
     """
     Compute MSE response maps for multiple patch sizes in a batch of images using downsample-upsample reconstruction.
     
@@ -637,6 +822,31 @@ def visualize_selected_patches_cv2_non_overlapping(
     annotated_image_pil = Image.fromarray(annotated_np)
     
     return annotated_image_pil
+
+register_importance_method(
+    'entropy',
+    batched=compute_patch_entropy_batched,
+    single=compute_patch_entropy_vectorized,
+)
+register_importance_method(
+    'laplacian',
+    batched=compute_patch_laplacian_batched,
+    single=compute_patch_laplacian_vectorized,
+    supports_aggregate=True,
+)
+register_importance_method(
+    'upsample_mse',
+    batched=compute_patch_mse_batched,
+    supports_aggregate=True,
+    default_kwargs={"scale_factors": [1.0, 0.5, 0.25]},
+)
+register_importance_method(
+    'mean_density',
+    batched=compute_patch_mean_density_batched,
+    single=compute_patch_mean_density_vectorized,
+    supports_aggregate=True,
+)
+
 
 if __name__ == '__main__':
     # Add visualizing!

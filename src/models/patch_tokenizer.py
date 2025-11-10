@@ -4,7 +4,7 @@ patch embedding. The goal is to compute only the parts
 that are needed, nothing more, and place them in a dictionary 
 for the patch embedding to use. 
 """
-from typing import Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 import ipdb
 import einops
 import torch
@@ -13,14 +13,11 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 import numpy as np
 import math
+import warnings
 from src.models.entropy_utils import (
     select_patches_by_threshold,
     visualize_selected_patches_cv2,
-    compute_patch_entropy_vectorized,
-    compute_patch_entropy_batched,
-    compute_patch_laplacian_vectorized,
-    compute_patch_laplacian_batched,
-    compute_patch_mse_batched
+    get_importance_method,
 )
 
 
@@ -34,8 +31,9 @@ class PatchTokenizer(nn.Module):
         thresholds (List[float]): Entropy thresholds for patch selection at each scale
         mean (List[float]): Mean values for normalization
         std (List[float]): Standard deviation values for normalization
-        method (str): Method to use for computing patch importance maps ('entropy' or 'laplacian')
-        laplacian_aggregate (str): Method to aggregate Laplacian values ('mean', 'max', or 'std')
+        method (str): Method to use for computing patch importance maps (e.g. 'entropy', 'laplacian')
+        laplacian_aggregate (str): Aggregation strategy for methods that support it ('mean', 'max', or 'std')
+        method_kwargs (Dict[str, Any]): Additional keyword arguments forwarded to the importance method
     """
     def __init__(
         self,
@@ -47,6 +45,7 @@ class PatchTokenizer(nn.Module):
         std: List[float],
         method: str = 'entropy',
         laplacian_aggregate: str = 'mean',
+        method_kwargs: Dict[str, Union[float, int, str]] = None,
     ):
         super().__init__()
         self.num_scales = num_scales
@@ -55,6 +54,20 @@ class PatchTokenizer(nn.Module):
         self.thresholds = thresholds
         self.method = method
         self.laplacian_aggregate = laplacian_aggregate
+        self.importance_aggregate = laplacian_aggregate
+        self.method_kwargs = method_kwargs.copy() if method_kwargs is not None else {}
+        self.importance_method = get_importance_method(self.method)
+
+        if self.importance_aggregate != 'mean' and not self.importance_method.supports_aggregate:
+            warnings.warn(
+                (
+                    f"Aggregation '{self.importance_aggregate}' is not supported for method "
+                    f"'{self.method}'. Defaulting to 'mean'."
+                ),
+                RuntimeWarning,
+            )
+            self.importance_aggregate = 'mean'
+            self.laplacian_aggregate = 'mean'
 
         self.pos_embed16: Union[torch.Tensor, None] = None
         self.pos_embed32: Union[torch.Tensor, None] = None
@@ -191,32 +204,18 @@ class PatchTokenizer(nn.Module):
             unnormalized_images = torch.clamp(unnormalized_images * 255.0, 0, 255)
             
             # Compute maps based on selected method
-            if self.method == 'entropy':
-                # Compute entropy maps for the entire batch
-                batch_maps = compute_patch_entropy_batched(
-                    unnormalized_images, 
-                    patch_size=self.base_patch_size, 
-                    num_scales=self.num_scales
-                )
-            elif self.method == 'laplacian':
-                # Compute Laplacian maps for the entire batch
-                batch_maps = compute_patch_laplacian_batched(
-                    unnormalized_images, 
-                    patch_size=self.base_patch_size, 
-                    num_scales=self.num_scales,
-                    aggregate=self.laplacian_aggregate
-                )
-            elif self.method == 'upsample_mse':
-                batch_maps = compute_patch_mse_batched(
-                    unnormalized_images, 
-                    patch_size=self.base_patch_size, 
-                    num_scales=self.num_scales,
-                    scale_factors=[1.0, 0.5, 0.25],
-                    aggregate='mean'
-                )
-            else:
-                raise ValueError(f"Unknown method: {self.method}. Choose 'entropy' or 'laplacian'")
-            
+            method_kwargs = self.importance_method.resolve_kwargs(
+                aggregate=self.importance_aggregate if self.importance_method.supports_aggregate else None,
+                overrides=self.method_kwargs,
+            )
+
+            batch_maps = self.importance_method.batched(
+                unnormalized_images,
+                patch_size=self.base_patch_size,
+                num_scales=self.num_scales,
+                **method_kwargs,
+            )
+
         return batch_maps
 
     def forward(
