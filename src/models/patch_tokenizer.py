@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 import numpy as np
 import math
+import warnings
 from src.models.entropy_utils import (
     select_patches_by_threshold,
     visualize_selected_patches_cv2,
@@ -58,9 +59,15 @@ class PatchTokenizer(nn.Module):
         self.importance_method = get_importance_method(self.method)
 
         if self.importance_aggregate != 'mean' and not self.importance_method.supports_aggregate:
-            raise ValueError(
-                f"Aggregation '{self.importance_aggregate}' is not supported for method '{self.method}'."
+            warnings.warn(
+                (
+                    f"Aggregation '{self.importance_aggregate}' is not supported for method "
+                    f"'{self.method}'. Defaulting to 'mean'."
+                ),
+                RuntimeWarning,
             )
+            self.importance_aggregate = 'mean'
+            self.laplacian_aggregate = 'mean'
 
         self.pos_embed16: Union[torch.Tensor, None] = None
         self.pos_embed32: Union[torch.Tensor, None] = None

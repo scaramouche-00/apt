@@ -9,6 +9,7 @@ from torchvision import transforms
 from torchvision.transforms import functional as TF
 
 import math
+import warnings
 import PIL.Image as Image
 from PIL import ImageDraw
 import os
@@ -152,13 +153,20 @@ def process_image(image_path, vis_type, method, aggregate, image_size, patch_siz
         
         # Compute importance maps based on selected method
         importance_method = get_importance_method(method)
+        effective_aggregate = aggregate
         if aggregate != 'mean' and not importance_method.supports_aggregate:
-            raise ValueError(
-                f"Aggregation '{aggregate}' is not supported for method '{method}'."
+            warnings.warn(
+                (
+                    f"Aggregation '{aggregate}' is not supported for method '{method}'. "
+                    "Defaulting to 'mean'."
+                ),
+                RuntimeWarning,
             )
+            effective_aggregate = 'mean'
 
         method_kwargs = importance_method.resolve_kwargs(
-            aggregate=aggregate if importance_method.supports_aggregate else None,
+            aggregate=
+                effective_aggregate if importance_method.supports_aggregate else None,
         )
 
         if importance_method.single is not None:
@@ -177,7 +185,11 @@ def process_image(image_path, vis_type, method, aggregate, image_size, patch_siz
             )
             importance_maps = {k: v.squeeze(0) for k, v in batched_maps.items()}
 
-        map_name = method if aggregate == 'mean' else f'{method}_{aggregate}'
+        map_name = (
+            method
+            if effective_aggregate == 'mean'
+            else f'{method}_{effective_aggregate}'
+        )
         
         # Ensure output directory exists
         os.makedirs(OUTPUT_DIR, exist_ok=True)

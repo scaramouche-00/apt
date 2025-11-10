@@ -8,6 +8,7 @@ from torchvision.transforms import functional as TF
 import numpy as np
 import ipdb
 from typing import Dict, Optional
+import warnings
 
 from src.models.entropy_utils import get_importance_method
 
@@ -108,9 +109,14 @@ class ImageFolderWithEntropy(ImageFolder):
         self.importance_method = get_importance_method(self.method)
 
         if self.aggregate != "mean" and not self.importance_method.supports_aggregate:
-            raise ValueError(
-                f"Aggregation '{self.aggregate}' is not supported for method '{self.method}'."
+            warnings.warn(
+                (
+                    f"Aggregation '{self.aggregate}' is not supported for method '{self.method}'. "
+                    "Defaulting to 'mean'."
+                ),
+                RuntimeWarning,
             )
+            self.aggregate = "mean"
 
     def __getitem__(self, index):
         path, target = self.samples[index]
