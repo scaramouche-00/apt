@@ -115,4 +115,6 @@ python scripts/gen_visualization_single.py \
   --vis_type grid
 ```
 
-Essential parameters: `--input` (required), `--output`, `--method` (entropy/laplacian/upsample_mse), `--vis_type` (entropy/grid/none), `--patch_size`, `--num_scales`, `--thresholds`.
+Essential parameters: `--input` (required), `--output`, `--method` (entropy/laplacian/upsample_mse/mean_density), `--vis_type` (entropy/grid/none), `--patch_size`, `--num_scales`, `--thresholds`.
+
+The available methods are registered in `src/models/entropy_utils.py`, making it easy to experiment by plugging in new importance metrics without touching the tokenizer or visualization scripts.
