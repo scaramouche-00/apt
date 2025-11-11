@@ -13,6 +13,7 @@ import warnings
 import PIL.Image as Image
 from PIL import ImageDraw
 import os
+from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
@@ -34,7 +35,6 @@ THRESHOLDS = [6.0, 6.0]
 LINE_COLOR = (255, 255, 255)  # White color
 LINE_THICKNESS = 1
 OUTPUT_PATH = "../assets/vis_single.jpg"
-OUTPUT_DIR = "../assets"
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate image visualizations with different options')
@@ -86,7 +86,21 @@ def save_entropy_map_as_heatmap(entropy_map, output_path, original_size):
     saved_img.save(output_path)
 
 
-def process_image(image_path, vis_type, method, aggregate, image_size, patch_size, num_scales, thresholds, line_color, line_thickness, output_prefix, no_resize=False):
+def process_image(
+    image_path,
+    vis_type,
+    method,
+    aggregate,
+    image_size,
+    patch_size,
+    num_scales,
+    thresholds,
+    line_color,
+    line_thickness,
+    output_prefix,
+    entropy_dir,
+    no_resize=False,
+):
     """Process a single image and return the visualization based on the specified type and method."""
     print(f"Processing image: {image_path}")
     
@@ -192,11 +206,11 @@ def process_image(image_path, vis_type, method, aggregate, image_size, patch_siz
         )
         
         # Ensure output directory exists
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        
+        os.makedirs(entropy_dir, exist_ok=True)
+
         # Save importance maps as heatmaps
         for scale, importance_map in importance_maps.items():
-            output_path = os.path.join(OUTPUT_DIR, f"{output_prefix}_{scale}.jpg")
+            output_path = os.path.join(entropy_dir, f"{output_prefix}_{scale}.jpg")
             save_entropy_map_as_heatmap(importance_map, output_path, (width, height))
             print(f"Saved {map_name} map for scale {scale} to {output_path}")
         
@@ -236,24 +250,28 @@ def main():
         args.thresholds = THRESHOLDS
     
     # Process the image
+    output_path = args.output
+    entropy_dir = Path(output_path).with_suffix("")
+
     result_image = process_image(
-        args.input, 
+        args.input,
         args.vis_type,
         args.method,
         args.aggregate,
-        args.image_size, 
-        args.patch_size, 
-        args.num_scales, 
-        args.thresholds, 
-        args.line_color, 
+        args.image_size,
+        args.patch_size,
+        args.num_scales,
+        args.thresholds,
+        args.line_color,
         args.line_thickness,
         args.output_prefix,
+        str(entropy_dir),
         args.no_resize
     )
-    
+
     # Ensure the output directory exists
-    output_path = args.output
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output_directory = os.path.dirname(output_path) or "."
+    os.makedirs(output_directory, exist_ok=True)
     
     # Save the result
     result_image.save(output_path)
